@@ -15,7 +15,10 @@ inputs:
   delete-previous-version:
     required: true
     description: Whether to delete the last version.
-    default: 'false'
+    default: "false"
+  release-tag:
+    required: false
+    description: The release tag to be used for creating manifests.
   token:
     required: true
     description: GitHub token to create pull request on Windows Package Manager Community Repository.
@@ -24,94 +27,8 @@ inputs:
     description: GitHub username where the fork of winget-pkgs is present.
     default: ${{ github.repository_owner }}
 runs:
-  using: composite
-  steps:
-    - name: Check runner OS and workflow trigger event
-      run: |
-        # Check runner OS and workflow trigger event
-        if ($IsWindows -eq $false) {
-          throw 'This action is only supported on Windows.'
-        }
-        if ('${{ github.event_name }}' -ne 'release') {
-          throw 'This action is only supported on release event.'
-        }
-        if ('${{ github.event.action }}' -notin @('released', 'prereleased')) {
-          throw 'This action is only supported on released and prereleased event types.'
-        }
-      shell: pwsh
-    - name: Checkout winget-pkgs repository
-      uses: actions/checkout@v3
-      with:
-        fetch-depth: 0
-        path: winget-pkgs
-        repository: microsoft/winget-pkgs
-        token: ${{ inputs.token }}
-    - name: Setup working environment
-      run: |
-        # Setup working environment
-        Install-Module -Name powershell-yaml -Repository PSGallery -Scope CurrentUser -Force # Install powershell-yaml module
-        # Get WinGetDev from winget-pkgs-automation (vedantmgoyal2009/vedantmgoyal2009)
-        svn checkout https://github.com/vedantmgoyal2009/vedantmgoyal2009/trunk/tools/wingetdev
-        # Set git user name, email and remotes
-        git -C winget-pkgs config --local user.name '${{ github.repository_owner }}'
-        git -C winget-pkgs config --local user.email '${{ github.event.repository.owner.id }}+${{ github.repository_owner }}@users.noreply.github.com'
-        git -C winget-pkgs remote rename origin upstream
-        git -C winget-pkgs remote add origin https://github.com/${{ inputs.fork-user }}/winget-pkgs.git
-        # Get YamlCreate from the repository and set settings
-        Invoke-WebRequest -Uri https://github.com/vedantmgoyal2009/winget-releaser/raw/main/YamlCreate.ps1 -OutFile .\winget-pkgs\Tools\YamlCreate.ps1
-        git -C winget-pkgs commit --all -m 'Update YamlCreate.ps1 with InputObject functionality' --quiet
-        New-Item -ItemType File -Path "$env:LOCALAPPDATA\YamlCreate\Settings.yaml" -Force | Out-Null
-        @'
-        TestManifestsInSandbox: never
-        SaveToTemporaryFolder: never
-        AutoSubmitPRs: always
-        ContinueWithExistingPRs: always
-        SuppressQuickUpdateWarning: true
-        EnableDeveloperOptions: true
-        '@ | Set-Content -Path $env:LOCALAPPDATA\YamlCreate\Settings.yaml
-      shell: pwsh
-    - name: Update manifests and publish
-      run: |
-        # Update manifests and publish
-        $WinGetDev = (Resolve-Path -Path ..\..\wingetdev\wingetdev.exe).Path # Set wingetdev.exe path variable
-        $PrBody = '### Pull request has been automatically created using 🛫 [WinGet Releaser](https://bittu.eu.org/docs/wr-intro).' # Set pull request body
-        $Upgrade = [System.Management.Automation.PSObject] @{
-          PackageIdentifier = '${{ inputs.identifier }}'
-          PackageVersion = ('${{ github.event.release.tag_name }}' | Select-String -Pattern '${{ inputs.version-regex }}').Matches.Value
-          InstallerUrls = ($env:RELEASE_ASSETS_JSON | ConvertFrom-Json).ForEach({ if ($_.name -match '${{ inputs.installers-regex }}') { $_.browser_download_url } })
-          ReleaseNotesUrl = '${{ github.event.release.html_url }}'
-          ReleaseDate = (Get-Date -Date '${{ github.event.release.published_at }}').ToString('yyyy-MM-dd')
-        }
-        $NoOfTimes = 0
-        while ($NoOfTimes -le 6) { # Retry total 5 times, on 6th time, throw that action timed out and finish
-            try {
-                If ('${{ inputs.delete-previous-version }}' -eq 'false' ? $true : $false) {
-                    . .\YamlCreate.ps1 -InputObject $Upgrade # Dot-source the script to get pull request body
-                } Else {
-                    . .\YamlCreate.ps1 -InputObject $Upgrade -DeletePreviousVersion # Dot-source the script to get pull request body
-                }
-                break
-            } catch {
-                If ($NoOfTimes -ne 6 -and $_.Exception.Message -in @('Installer URLs are required', 'Number of InstallerUrls are not equal')) {
-                    $NoOfTimes++
-                    Write-Output "Retrying to get installer URLs... [$NoOfTimes/5] (next retry after 10 minutes)"
-                    Start-Sleep -Seconds 600 # Wait for 10 minutes so we don't hit GitHub API rate limit
-                    $Upgrade.InstallerUrls = (Invoke-RestMethod -Uri '${{ github.event.release.assets_url }}').ForEach({ if ($_.name -match '${{ inputs.installers-regex }}') { $_.browser_download_url } })
-                } ElseIf ($NoOfTimes -eq 6 -and $_.Exception.Message -in @('Installer URLs are required', 'Number of InstallerUrls are not equal')) {
-                    throw @"
-        Error: 404_SOME_ASSETS_WERE_NOT_FOUND
-        Learn more about this error at: https://bittu.eu.org/docs/wr-notes
-        "@
-                } Else {
-                    throw $_.Exception.Message
-                }
-            }
-        }
-      working-directory: winget-pkgs/Tools
-      shell: pwsh
-      env:
-        GITHUB_TOKEN: ${{ inputs.token }}
-        RELEASE_ASSETS_JSON: ${{ toJSON(github.event.release.assets) }}
+  using: node16
+  main: dist/index.js
 branding:
   color: blue
   icon: upload-cloud

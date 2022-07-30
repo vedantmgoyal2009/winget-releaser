@@ -3,47 +3,15 @@
 
 Param
 (
-    [switch] $AutoUpgrade,
-    [switch] $SkipPRCheck,
-    [switch] $DeletePreviousVersion,
     [Parameter(Mandatory = $true)]
-    [PSCustomObject] $InputObject
+    [System.String] $InputObject
 )
-
-# Set settings directory on basis of Operating System
-$script:SettingsPath = Join-Path $(if ([System.Environment]::OSVersion.Platform -match 'Win') { $env:LOCALAPPDATA } else { $env:HOME + '/.config' } ) -ChildPath 'YamlCreate'
-$script:SettingsPath = $(Join-Path $script:SettingsPath -ChildPath 'Settings.yaml')
-# Load settings from file
-$ScriptSettings = ConvertFrom-Yaml -Yaml ($(Get-Content -Path $script:SettingsPath -Encoding UTF8) -join "`n")
 
 $ScriptHeader = '# Created with YamlCreate.ps1 v2.0.7 using InputObject 🤖'
 $ManifestVersion = '1.1.0'
 $PSDefaultParameterValues = @{ '*:Encoding' = 'UTF8' }
 $Utf8NoBomEncoding = New-Object System.Text.UTF8Encoding $False
 $ofs = ', '
-
-<#
-.SYNOPSIS
-    Winget Manifest creation helper script
-.DESCRIPTION
-    The intent of this file is to help you generate a manifest for publishing
-    to the Windows Package Manager repository.
-
-    It'll attempt to download an installer from the user-provided URL to calculate
-    a checksum. That checksum and the rest of the input data will be compiled in a
-    .YAML file.
-.EXAMPLE
-    PS C:\Projects\winget-pkgs> Get-Help .\Tools\YamlCreate.ps1 -Full
-    Show this script's help
-.EXAMPLE
-    PS C:\Projects\winget-pkgs> .\Tools\YamlCreate.ps1
-    Run the script to create a manifest file
-.NOTES
-    Please file an issue if you run into errors with this script:
-    https://github.com/microsoft/winget-pkgs/issues/
-.LINK
-    https://github.com/microsoft/winget-pkgs/blob/master/Tools/YamlCreate.ps1
-#>
 
 # Fetch Schema data from github for entry validation, key ordering, and automatic commenting
 try {
@@ -679,33 +647,17 @@ function Remove-ManifestVersion {
 # Initialize the return value to be a success
 $script:_returnValue = [ReturnValue]::new(200)
 
-if (-not $AutoUpgrade) {
-    $script:Option = 'QuickUpdateVersion'
-} else {
-    $script:Option = 'Auto'
-}
+$script:Option = 'QuickUpdateVersion'
 
+$InputObject = $InputObject | ConvertFrom-Json
 if ($null -eq $InputObject.PackageIdentifier) { throw 'Package Identifier is required' }
 if ($null -eq $InputObject.PackageVersion) { throw 'Package Version is required' }
-if ($null -eq $InputObject.InstallerUrls) { throw 'Installer URLs are required' }
+if ($null -eq $InputObject.InstallerUrls) { throw 'InstallerUrls are required' }
 
 $script:PackageIdentifier = $InputObject.PackageIdentifier
 $script:PackageVersion = $InputObject.PackageVersion
 
 $PackageIdentifierFolder = $PackageIdentifier.Replace('.', '\')
-
-# Check the api for open PR's
-# This is unauthenticated because the call-rate per minute is assumed to be low
-if ($ScriptSettings.ContinueWithExistingPRs -ne 'always' -and $script:Option -ne 'RemoveManifest' -and !$SkipPRCheck) {
-    $PRApiResponse = Invoke-RestMethod -Uri "https://api.github.com/search/issues?q=repo%3Amicrosoft%2Fwinget-pkgs%20is%3Apr%20$($PackageIdentifier -replace '\.', '%2F'))%2F$PackageVersion%20in%3Apath&per_page=1" -ErrorAction SilentlyContinue
-    # If there was a PR found, get the URL and title
-    if ($PRApiResponse.total_count -gt 0) {
-        $_PRUrl = $PRApiResponse.items.html_url
-        $_PRTitle = $PRApiResponse.items.title
-        Write-Host -ForegroundColor Red "[Existing PR Found] $_PRTitle`n--->  $_PRUrl"
-        exit
-    }
-}
 
 # Set the root folder where new manifests should be created
 if (Test-Path -Path "$PSScriptRoot\..\manifests") {
@@ -884,226 +836,141 @@ if ($OldManifests -and $Option -ne 'NewLocale') {
     }
 }
 
-# Run the data entry and creation of manifests appropriate to the option the user selected
-Switch ($script:Option) {
-    'QuickUpdateVersion' {
-        $script:InputKeys = ($InputObject | Get-Member | Where-Object { $_.MemberType -eq 'NoteProperty' }).Name
-        $InputObject.InstallerUrls = Sort-Object -InputObject $InputObject.InstallerUrls
-        if (-not $InputObject.InstallerUrls.GetType().IsArray) {
-            $InputObject.InstallerUrls = @($InputObject.InstallerUrls)
-        }
-
-        # We know old manifests exist if we got here without error
-        # Fetch the old installers based on the manifest type
-        if ($script:OldInstallerManifest) { $_OldInstallers = $script:OldInstallerManifest['Installers'] } else {
-            $_OldInstallers = $script:OldVersionManifest['Installers']
-        }
-
-        $_OldInstallers = Sort-Object -InputObject $_OldInstallers -Property InstallerUrl
-
-        if (($_OldInstallers.InstallerUrl | Select-Object -Unique).Count -ne $InputObject.InstallerUrls.Count) {
-            Throw 'Number of InstallerUrls are not equal'
-        }
-
-        $_iteration = 0
-        $_urlsIteration = 0
-        $_NewInstallers = @()
-        foreach ($_OldInstaller in $_OldInstallers) {
-            # Create the new installer as an exact copy of the old installer entry
-            # This is to ensure all previously entered and un-modified parameters are retained
-            $_iteration += 1
-            $_NewInstaller = $_OldInstaller
-            $_NewInstaller.Remove('InstallerSha256');
-
-            # Show the user which installer entry they should be entering information for
-            Write-Host -ForegroundColor 'Green' "Installer Entry #$_iteration`:`n"
-            if ($_OldInstaller.InstallerLocale) { Write-Host -ForegroundColor 'Yellow' "`tInstallerLocale: $($_OldInstaller.InstallerLocale)" }
-            if ($_OldInstaller.Architecture) { Write-Host -ForegroundColor 'Yellow' "`tArchitecture: $($_OldInstaller.Architecture)" }
-            if ($_OldInstaller.InstallerType) { Write-Host -ForegroundColor 'Yellow' "`tInstallerType: $($_OldInstaller.InstallerType)" }
-            if ($_OldInstaller.Scope) { Write-Host -ForegroundColor 'Yellow' "`tScope: $($_OldInstaller.Scope)" }
-            Write-Host
-
-            # Request user enter the new Installer URL
-            # $_NewInstaller['InstallerUrl'] = Request-InstallerUrl
-
-            if ($PrevOldInstallerUrl -eq $_OldInstaller.InstallerUrl) {
-                $_NewInstaller.InstallerUrl = $PrevNewInstallerUrl
-            } else {
-                $PrevOldInstallerUrl = $_OldInstaller.InstallerUrl
-                $PrevNewInstallerUrl = $_NewInstaller.InstallerUrl = $InputObject.InstallerUrls[$_urlsIteration]
-                $_urlsIteration += 1
-            }
-
-            if ($_NewInstaller.InstallerUrl -in ($_NewInstallers).InstallerUrl) {
-                $_MatchingInstaller = $_NewInstallers | Where-Object { $_.InstallerUrl -eq $_NewInstaller.InstallerUrl } | Select-Object -First 1
-                if ($_MatchingInstaller.InstallerSha256) { $_NewInstaller['InstallerSha256'] = $_MatchingInstaller.InstallerSha256 }
-                if ($_MatchingInstaller.InstallerType) { $_NewInstaller['InstallerType'] = $_MatchingInstaller.InstallerType }
-                if ($_MatchingInstaller.ProductCode) { $_NewInstaller['ProductCode'] = $_MatchingInstaller.ProductCode }
-                elseif ( ($_NewInstaller.Keys -contains 'ProductCode') -and ($script:dest -notmatch '.exe$')) { $_NewInstaller.Remove('ProductCode') }
-                if ($_MatchingInstaller.PackageFamilyName) { $_NewInstaller['PackageFamilyName'] = $_MatchingInstaller.PackageFamilyName }
-                elseif ($_NewInstaller.Keys -contains 'PackageFamilyName') { $_NewInstaller.Remove('PackageFamilyName') }
-                if ($_MatchingInstaller.SignatureSha256) { $_NewInstaller['SignatureSha256'] = $_MatchingInstaller.SignatureSha256 }
-                elseif ($_NewInstaller.Keys -contains 'SignatureSha256') { $_NewInstaller.Remove('SignatureSha256') }
-            }
-
-            if ($_NewInstaller.Keys -notcontains 'InstallerSha256') {
-                try {
-                    $script:dest = Get-InstallerFile -URI $_NewInstaller['InstallerUrl'] -PackageIdentifier $PackageIdentifier -PackageVersion $PackageVersion
-                } catch {
-                    # Here we also want to pass any exceptions through for potential debugging
-                    throw [System.Net.WebException]::new('The file could not be downloaded. Try running the script again', $_.Exception)
-                } finally {
-                    # Check that MSI's aren't actually WIX
-                    if ($_NewInstaller['InstallerType'] -eq 'msi') {
-                        $DetectedType = Get-PathInstallerType $script:dest
-                        if ($DetectedType -in @('msi'; 'wix')) { $_NewInstaller['InstallerType'] = $DetectedType }
-                    }
-                    # Get the Sha256
-                    $_NewInstaller['InstallerSha256'] = (Get-FileHash -Path $script:dest -Algorithm SHA256).Hash
-                    # Update the product code, if a new one exists
-                    # If a new product code doesn't exist, and the installer isn't an `.exe` file, remove the product code if it exists
-                    $MSIProductCode = $null
-                    if ([System.Environment]::OSVersion.Platform -match 'Win' -and ($script:dest).EndsWith('.msi')) {
-                        $MSIProductCode = ([string](Get-MSIProperty -MSIPath $script:dest -Parameter 'ProductCode') | Select-String -Pattern '{[A-Z0-9]{8}-([A-Z0-9]{4}-){3}[A-Z0-9]{12}}').Matches.Value
-                    }
-                    if (Test-String -not $MSIProductCode -IsNull) {
-                        $_NewInstaller['ProductCode'] = $MSIProductCode
-                    } elseif ( ($_NewInstaller.Keys -contains 'ProductCode') -and ($_NewInstaller.InstallerType -in @('appx'; 'msi'; 'msix'; 'wix'; 'burn'))) {
-                        $_NewInstaller.Remove('ProductCode')
-                    }
-                    # If the installer is msix or appx, try getting the new SignatureSha256
-                    # If the new SignatureSha256 can't be found, remove it if it exists
-                    if ($_NewInstaller.InstallerType -in @('msix', 'appx')) {
-                        $NewSignatureSha256 = & $WinGetDev hash -m $script:dest | Select-String -Pattern 'SignatureSha256:' | ConvertFrom-String; if ($NewSignatureSha256.P2) { $NewSignatureSha256 = $NewSignatureSha256.P2.ToUpper() }
-                    }
-                    if (Test-String -not $NewSignatureSha256 -IsNull) {
-                        $_NewInstaller['SignatureSha256'] = $NewSignatureSha256
-                    } elseif ($_NewInstaller.Keys -contains 'SignatureSha256') {
-                        $_NewInstaller.Remove('SignatureSha256')
-                    }
-                    # If the installer is msix or appx, try getting the new package family name
-                    # If the new package family name can't be found, remove it if it exists
-                    if ($script:dest -match '\.(msix|appx)(bundle){0,1}$') {
-                        try {
-                            Add-AppxPackage -Path $script:dest
-                            $InstalledPkg = Get-AppxPackage | Select-Object -Last 1 | Select-Object PackageFamilyName, PackageFullName
-                            $PackageFamilyName = $InstalledPkg.PackageFamilyName
-                            Remove-AppxPackage $InstalledPkg.PackageFullName
-                        } catch {
-                            # Take no action here, we just want to catch the exceptions as a precaution
-                            Out-Null
-                        } finally {
-                            if (Test-String -not $PackageFamilyName -IsNull) {
-                                $_NewInstaller['PackageFamilyName'] = $PackageFamilyName
-                            } elseif ($_NewInstaller.Keys -contains 'PackageFamilyName') {
-                                $_NewInstaller.Remove('PackageFamilyName')
-                            }
-                        }
-                    }
-                    # Remove the downloaded files
-                    Remove-Item -Path $script:dest
-                }
-            }
-            # Add the updated installer to the new installers array
-            $_NewInstaller = Restore-YamlKeyOrder $_NewInstaller $InstallerEntryProperties -NoComments
-            $_NewInstallers += $_NewInstaller
-        }
-        $script:Installers = $_NewInstallers
-
-        Write-LocaleManifest
-        Write-InstallerManifest
-        Write-VersionManifest
-        # Delete previous manifests if $DeletePreviousVersion is true
-        if ($DeletePreviousVersion) {
-            Remove-ManifestVersion "$AppFolder\..\$LastVersion"
-        }
-    }
-
-    'Auto' {
-        # Set new package version
-        $script:OldInstallerManifest['PackageVersion'] = $PackageVersion
-        $script:OldLocaleManifest['PackageVersion'] = $PackageVersion
-        $script:OldVersionManifest['PackageVersion'] = $PackageVersion
-
-        # Update the manifest with URLs that are already there
-        Write-Host $NewLine
-        Write-Host 'Updating Manifest Information. This may take a while...' -ForegroundColor Blue
-        foreach ($_Installer in $script:OldInstallerManifest.Installers) {
-            try {
-                $script:dest = Get-InstallerFile -URI $_Installer.InstallerUrl -PackageIdentifier $PackageIdentifier -PackageVersion $PackageVersion
-            } catch {
-                # Here we also want to pass any exceptions through for potential debugging
-                throw [System.Net.WebException]::new('The file could not be downloaded. Try running the script again', $_.Exception)
-            } finally {
-                # Check that MSI's aren't actually WIX
-                if ($_Installer['InstallerType'] -eq 'msi') {
-                    $DetectedType = Get-PathInstallerType $script:dest
-                    if ($DetectedType -in @('msi'; 'wix')) { $_Installer['InstallerType'] = $DetectedType }
-                }
-                # Get the Sha256
-                $_Installer['InstallerSha256'] = (Get-FileHash -Path $script:dest -Algorithm SHA256).Hash
-                # Update the product code, if a new one exists
-                # If a new product code doesn't exist, and the installer isn't an `.exe` file, remove the product code if it exists
-                $MSIProductCode = $null
-                if ([System.Environment]::OSVersion.Platform -match 'Win' -and ($script:dest).EndsWith('.msi')) {
-                    $MSIProductCode = ([string](Get-MSIProperty -MSIPath $script:dest -Parameter 'ProductCode') | Select-String -Pattern '{[A-Z0-9]{8}-([A-Z0-9]{4}-){3}[A-Z0-9]{12}}').Matches.Value
-                }
-                if (Test-String -not $MSIProductCode -IsNull) {
-                    $_Installer['ProductCode'] = $MSIProductCode
-                } elseif ( ($_Installer.Keys -contains 'ProductCode') -and ($_Installer.InstallerType -in @('appx'; 'msi'; 'msix'; 'wix'; 'burn'))) {
-                    $_Installer.Remove('ProductCode')
-                }
-                # If the installer is msix or appx, try getting the new SignatureSha256
-                # If the new SignatureSha256 can't be found, remove it if it exists
-                if ($_Installer.InstallerType -in @('msix', 'appx')) {
-                    $NewSignatureSha256 = & $WinGetDev hash -m $script:dest | Select-String -Pattern 'SignatureSha256:' | ConvertFrom-String; if ($NewSignatureSha256.P2) { $NewSignatureSha256 = $NewSignatureSha256.P2.ToUpper() }
-                }
-                if (Test-String -not $NewSignatureSha256 -IsNull) {
-                    $_Installer['SignatureSha256'] = $NewSignatureSha256
-                } elseif ($_Installer.Keys -contains 'SignatureSha256') {
-                    $_Installer.Remove('SignatureSha256')
-                }
-                # If the installer is msix or appx, try getting the new package family name
-                # If the new package family name can't be found, remove it if it exists
-                if ($script:dest -match '\.(msix|appx)(bundle){0,1}$') {
-                    try {
-                        Add-AppxPackage -Path $script:dest
-                        $InstalledPkg = Get-AppxPackage | Select-Object -Last 1 | Select-Object PackageFamilyName, PackageFullName
-                        $PackageFamilyName = $InstalledPkg.PackageFamilyName
-                        Remove-AppxPackage $InstalledPkg.PackageFullName
-                    } catch {
-                        # Take no action here, we just want to catch the exceptions as a precaution
-                        Out-Null
-                    } finally {
-                        if (Test-String -not $PackageFamilyName -IsNull) {
-                            $_Installer['PackageFamilyName'] = $PackageFamilyName
-                        } elseif ($_Installer.Keys -contains 'PackageFamilyName') {
-                            $_Installer.Remove('PackageFamilyName')
-                        }
-                    }
-                }
-                # Remove the downloaded files
-                Remove-Item -Path $script:dest
-            }
-        }
-        # Write the new manifests
-        $script:Installers = $script:OldInstallerManifest.Installers
-        Write-LocaleManifest
-        Write-InstallerManifest
-        Write-VersionManifest
-        # Remove the old manifests
-        if ($PackageVersion -ne $LastVersion) { Remove-ManifestVersion "$AppFolder\..\$LastVersion" }
-    }
+# Run the data entry and creation of manifests
+$script:InputKeys = ($InputObject | Get-Member | Where-Object { $_.MemberType -eq 'NoteProperty' }).Name
+$InputObject.InstallerUrls = Sort-Object -InputObject $InputObject.InstallerUrls
+if (-not $InputObject.InstallerUrls.GetType().IsArray) {
+    $InputObject.InstallerUrls = @($InputObject.InstallerUrls)
 }
+
+# We know old manifests exist if we got here without error
+# Fetch the old installers based on the manifest type
+if ($script:OldInstallerManifest) { $_OldInstallers = $script:OldInstallerManifest['Installers'] } else {
+    $_OldInstallers = $script:OldVersionManifest['Installers']
+}
+
+$_OldInstallers = Sort-Object -InputObject $_OldInstallers -Property InstallerUrl
+
+if (($_OldInstallers.InstallerUrl | Select-Object -Unique).Count -ne $InputObject.InstallerUrls.Count) {
+    Throw 'Number of InstallerUrls are not equal'
+}
+
+$_iteration = 0
+$_urlsIteration = 0
+$_NewInstallers = @()
+foreach ($_OldInstaller in $_OldInstallers) {
+    # Create the new installer as an exact copy of the old installer entry
+    # This is to ensure all previously entered and un-modified parameters are retained
+    $_iteration += 1
+    $_NewInstaller = $_OldInstaller
+    $_NewInstaller.Remove('InstallerSha256');
+
+    # Show the user which installer entry they should be entering information for
+    Write-Host -ForegroundColor 'Green' "Installer Entry #$_iteration`:`n"
+    if ($_OldInstaller.InstallerLocale) { Write-Host -ForegroundColor 'Yellow' "`tInstallerLocale: $($_OldInstaller.InstallerLocale)" }
+    if ($_OldInstaller.Architecture) { Write-Host -ForegroundColor 'Yellow' "`tArchitecture: $($_OldInstaller.Architecture)" }
+    if ($_OldInstaller.InstallerType) { Write-Host -ForegroundColor 'Yellow' "`tInstallerType: $($_OldInstaller.InstallerType)" }
+    if ($_OldInstaller.Scope) { Write-Host -ForegroundColor 'Yellow' "`tScope: $($_OldInstaller.Scope)" }
+    Write-Host
+
+    # Request user enter the new Installer URL
+    # $_NewInstaller['InstallerUrl'] = Request-InstallerUrl
+
+    if ($PrevOldInstallerUrl -eq $_OldInstaller.InstallerUrl) {
+        $_NewInstaller.InstallerUrl = $PrevNewInstallerUrl
+    } else {
+        $PrevOldInstallerUrl = $_OldInstaller.InstallerUrl
+        $PrevNewInstallerUrl = $_NewInstaller.InstallerUrl = $InputObject.InstallerUrls[$_urlsIteration]
+        $_urlsIteration += 1
+    }
+
+    if ($_NewInstaller.InstallerUrl -in ($_NewInstallers).InstallerUrl) {
+        $_MatchingInstaller = $_NewInstallers | Where-Object { $_.InstallerUrl -eq $_NewInstaller.InstallerUrl } | Select-Object -First 1
+        if ($_MatchingInstaller.InstallerSha256) { $_NewInstaller['InstallerSha256'] = $_MatchingInstaller.InstallerSha256 }
+        if ($_MatchingInstaller.InstallerType) { $_NewInstaller['InstallerType'] = $_MatchingInstaller.InstallerType }
+        if ($_MatchingInstaller.ProductCode) { $_NewInstaller['ProductCode'] = $_MatchingInstaller.ProductCode }
+        elseif ( ($_NewInstaller.Keys -contains 'ProductCode') -and ($script:dest -notmatch '.exe$')) { $_NewInstaller.Remove('ProductCode') }
+        if ($_MatchingInstaller.PackageFamilyName) { $_NewInstaller['PackageFamilyName'] = $_MatchingInstaller.PackageFamilyName }
+        elseif ($_NewInstaller.Keys -contains 'PackageFamilyName') { $_NewInstaller.Remove('PackageFamilyName') }
+        if ($_MatchingInstaller.SignatureSha256) { $_NewInstaller['SignatureSha256'] = $_MatchingInstaller.SignatureSha256 }
+        elseif ($_NewInstaller.Keys -contains 'SignatureSha256') { $_NewInstaller.Remove('SignatureSha256') }
+    }
+
+    if ($_NewInstaller.Keys -notcontains 'InstallerSha256') {
+        try {
+            $script:dest = Get-InstallerFile -URI $_NewInstaller['InstallerUrl'] -PackageIdentifier $PackageIdentifier -PackageVersion $PackageVersion
+        } catch {
+            # Here we also want to pass any exceptions through for potential debugging
+            throw [System.Net.WebException]::new('The file could not be downloaded. Try running the script again', $_.Exception)
+        } finally {
+            # Check that MSI's aren't actually WIX
+            if ($_NewInstaller['InstallerType'] -eq 'msi') {
+                $DetectedType = Get-PathInstallerType $script:dest
+                if ($DetectedType -in @('msi'; 'wix')) { $_NewInstaller['InstallerType'] = $DetectedType }
+            }
+            # Get the Sha256
+            $_NewInstaller['InstallerSha256'] = (Get-FileHash -Path $script:dest -Algorithm SHA256).Hash
+            # Update the product code, if a new one exists
+            # If a new product code doesn't exist, and the installer isn't an `.exe` file, remove the product code if it exists
+            $MSIProductCode = $null
+            if ([System.Environment]::OSVersion.Platform -match 'Win' -and ($script:dest).EndsWith('.msi')) {
+                $MSIProductCode = ([string](Get-MSIProperty -MSIPath $script:dest -Parameter 'ProductCode') | Select-String -Pattern '{[A-Z0-9]{8}-([A-Z0-9]{4}-){3}[A-Z0-9]{12}}').Matches.Value
+            }
+            if (Test-String -not $MSIProductCode -IsNull) {
+                $_NewInstaller['ProductCode'] = $MSIProductCode
+            } elseif ( ($_NewInstaller.Keys -contains 'ProductCode') -and ($_NewInstaller.InstallerType -in @('appx'; 'msi'; 'msix'; 'wix'; 'burn'))) {
+                $_NewInstaller.Remove('ProductCode')
+            }
+            # If the installer is msix or appx, try getting the new SignatureSha256
+            # If the new SignatureSha256 can't be found, remove it if it exists
+            if ($_NewInstaller.InstallerType -in @('msix', 'appx')) {
+                $NewSignatureSha256 = & $env:WinGetDev hash -m $script:dest | Select-String -Pattern 'SignatureSha256:' | ConvertFrom-String; if ($NewSignatureSha256.P2) { $NewSignatureSha256 = $NewSignatureSha256.P2.ToUpper() }
+            }
+            if (Test-String -not $NewSignatureSha256 -IsNull) {
+                $_NewInstaller['SignatureSha256'] = $NewSignatureSha256
+            } elseif ($_NewInstaller.Keys -contains 'SignatureSha256') {
+                $_NewInstaller.Remove('SignatureSha256')
+            }
+            # If the installer is msix or appx, try getting the new package family name
+            # If the new package family name can't be found, remove it if it exists
+            if ($script:dest -match '\.(msix|appx)(bundle){0,1}$') {
+                try {
+                    Add-AppxPackage -Path $script:dest
+                    $InstalledPkg = Get-AppxPackage | Select-Object -Last 1 | Select-Object PackageFamilyName, PackageFullName
+                    $PackageFamilyName = $InstalledPkg.PackageFamilyName
+                    Remove-AppxPackage $InstalledPkg.PackageFullName
+                } catch {
+                    # Take no action here, we just want to catch the exceptions as a precaution
+                    Out-Null
+                } finally {
+                    if (Test-String -not $PackageFamilyName -IsNull) {
+                        $_NewInstaller['PackageFamilyName'] = $PackageFamilyName
+                    } elseif ($_NewInstaller.Keys -contains 'PackageFamilyName') {
+                        $_NewInstaller.Remove('PackageFamilyName')
+                    }
+                }
+            }
+            # Remove the downloaded files
+            Remove-Item -Path $script:dest
+        }
+    }
+    # Add the updated installer to the new installers array
+    $_NewInstaller = Restore-YamlKeyOrder $_NewInstaller $InstallerEntryProperties -NoComments
+    $_NewInstallers += $_NewInstaller
+}
+$script:Installers = $_NewInstallers
+
+Write-LocaleManifest
+Write-InstallerManifest
+Write-VersionManifest
+# Delete previous manifests if $InputObject.DeletePreviousVersion is true
+if ($InputObject.DeletePreviousVersion) {
+    Remove-ManifestVersion "$AppFolder\..\$LastVersion"
+}
+
 
 # If the user has winget installed, attempt to validate the manifests
-& $WinGetDev validate $AppFolder
-
-# Check the settings to see if we need to display this menu
-if ($ScriptSettings.TestManifestsInSandbox -eq 'always') {
-    # dot-source the function to get pull request body
-    . Test-ArpMetadata -ManifestFolder $AppFolder
-}
+& $env:WinGetDev validate $AppFolder
 
 # Determine what type of update should be used as the prefix for the PR
 $AllVersions = (@($script:ExistingVersions) + @($PackageVersion)) | Sort-Object $ToNatural
@@ -1131,7 +998,7 @@ if ($LASTEXITCODE -eq '0') {
     git commit -m "$CommitType`: $PackageIdentifier version $PackageVersion" --quiet
     git switch -c "$BranchName" --quiet
     git push --set-upstream origin "$BranchName" --quiet
-    gh pr create -f --body "$PrBody"
+    gh pr create -f --body '$### Pull request has been automatically created using 🛫 [WinGet Releaser](https://bittu.eu.org/docs/wr-intro).'
     git switch master --quiet
     git pull --quiet
 }
